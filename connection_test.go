@@ -1882,7 +1882,7 @@ func TestConnectionInitialPacketSizeFallback(t *testing.T) {
 			require.Equal(t, uint32(estimateMaxPayloadSize(protocol.MinInitialPacketSize)), tc.conn.maxPayloadSizeEstimate.Load())
 			require.Zero(t, tc.conn.config.InitialPacketSize)
 
-			tc.conn.peerParams = &wire.TransportParameters{MaxUDPPayloadSize: 1300, ActiveConnectionIDLimit: 2}
+			tc.conn.peerParams.Store(&wire.TransportParameters{MaxUDPPayloadSize: 1300, ActiveConnectionIDLimit: 2})
 			tc.conn.applyTransportParameters()
 			require.Equal(t, protocol.ByteCount(protocol.MinInitialPacketSize), tc.conn.maxPacketSize())
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"github.com/quic-go/quic-go/internal/monotime"
 	"github.com/quic-go/quic-go/internal/protocol"
@@ -30,13 +31,15 @@ type streamsMap struct {
 	queueControlFrame func(wire.Frame)
 	newFlowController func(protocol.StreamID) *streamFlowController
 
-	mutex                 sync.Mutex
-	outgoingBidiStreams   *outgoingStreamsMap[*Stream]
-	outgoingUniStreams    *outgoingStreamsMap[*SendStream]
-	incomingBidiStreams   *incomingStreamsMap[*Stream]
-	incomingUniStreams    *incomingStreamsMap[*ReceiveStream]
-	reset                 bool
-	supportsResetStreamAt bool
+	mutex               sync.Mutex
+	outgoingBidiStreams *outgoingStreamsMap[*Stream]
+	outgoingUniStreams  *outgoingStreamsMap[*SendStream]
+	incomingBidiStreams *incomingStreamsMap[*Stream]
+	incomingUniStreams  *incomingStreamsMap[*ReceiveStream]
+	reset               bool
+	// supportsResetStreamAt is set by the run loop when the peer's transport parameters are
+	// applied, and read when a stream is opened, possibly by another goroutine during 0-RTT.
+	supportsResetStreamAt atomic.Bool
 }
 
 func newStreamsMap(
@@ -67,7 +70,7 @@ func (m *streamsMap) initMaps() {
 	m.outgoingBidiStreams = newOutgoingStreamsMap(
 		protocol.StreamTypeBidi,
 		func(id protocol.StreamID) *Stream {
-			return newStream(m.ctx, id, m.sender, m.newFlowController(id), m.supportsResetStreamAt)
+			return newStream(m.ctx, id, m.sender, m.newFlowController(id), m.supportsResetStreamAt.Load())
 		},
 		m.queueControlFrame,
 		m.perspective,
@@ -75,7 +78,7 @@ func (m *streamsMap) initMaps() {
 	m.incomingBidiStreams = newIncomingStreamsMap(
 		protocol.StreamTypeBidi,
 		func(id protocol.StreamID) *Stream {
-			return newStream(m.ctx, id, m.sender, m.newFlowController(id), m.supportsResetStreamAt)
+			return newStream(m.ctx, id, m.sender, m.newFlowController(id), m.supportsResetStreamAt.Load())
 		},
 		m.maxIncomingBidiStreams,
 		m.requireStreamCreditRelease,
@@ -85,7 +88,7 @@ func (m *streamsMap) initMaps() {
 	m.outgoingUniStreams = newOutgoingStreamsMap(
 		protocol.StreamTypeUni,
 		func(id protocol.StreamID) *SendStream {
-			return newSendStream(m.ctx, id, m.sender, m.newFlowController(id), m.supportsResetStreamAt)
+			return newSendStream(m.ctx, id, m.sender, m.newFlowController(id), m.supportsResetStreamAt.Load())
 		},
 		m.queueControlFrame,
 		m.perspective,
@@ -335,7 +338,7 @@ func (m *streamsMap) HandleStreamFrame(f *wire.StreamFrame, rcvTime monotime.Tim
 }
 
 func (m *streamsMap) HandleTransportParameters(p *wire.TransportParameters) {
-	m.supportsResetStreamAt = p.EnableResetStreamAt
+	m.supportsResetStreamAt.Store(p.EnableResetStreamAt)
 	if p.EnableResetStreamAt {
 		m.outgoingBidiStreams.EnableResetStreamAt()
 		m.outgoingUniStreams.EnableResetStreamAt()
@@ -363,7 +366,7 @@ func (m *streamsMap) ResetFor0RTT() {
 	defer m.mutex.Unlock()
 	m.reset = true
 	m.CloseWithError(Err0RTTRejected)
-	m.supportsResetStreamAt = false
+	m.supportsResetStreamAt.Store(false)
 	m.initMaps()
 }
 

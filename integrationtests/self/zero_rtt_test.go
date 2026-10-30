@@ -215,6 +215,85 @@ func Test0RTTTransfer(t *testing.T) {
 	})
 }
 
+// Opening a stream on an early connection and only using it once the
+// handshake has completed: the stream's creation reads the transport
+// parameters restored from the session ticket, while the ones the server
+// sends replace them as the handshake completes.
+func Test0RTTOpenStreamBeforeHandshakeCompletion(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const rtt = 50 * time.Millisecond
+
+		clientConn, serverConn, closeFn := newSimnetLink(t, rtt)
+		defer closeFn(t)
+
+		tr := &quic.Transport{Conn: serverConn}
+		defer tr.Close()
+		ln, err := tr.ListenEarly(getTLSConfig(), getQuicConfig(&quic.Config{Allow0RTT: true}))
+		require.NoError(t, err)
+		defer ln.Close()
+		clientTLSConf := dialAndReceiveTicket(t, ln, clientConn, nil)
+
+		errChan := make(chan error, 1)
+		serverConnChan := make(chan *quic.Conn, 1)
+		go func() {
+			defer close(errChan)
+			conn, err := ln.Accept(context.Background())
+			if err != nil {
+				errChan <- err
+				return
+			}
+			serverConnChan <- conn
+			str, err := conn.AcceptUniStream(context.Background())
+			if err != nil {
+				errChan <- err
+				return
+			}
+			data, err := io.ReadAll(str)
+			if err != nil {
+				errChan <- err
+				return
+			}
+			if !bytes.Equal(data, []byte("foobar")) {
+				errChan <- fmt.Errorf("unexpected data: %q", data)
+			}
+		}()
+
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		conn, err := quic.DialEarly(ctx, clientConn, serverConn.LocalAddr(), clientTLSConf, getQuicConfig(nil))
+		require.NoError(t, err)
+		// open the stream right away, but only use it once the handshake has completed
+		str, err := conn.OpenUniStream()
+		require.NoError(t, err)
+
+		select {
+		case <-conn.HandshakeComplete():
+		case <-time.After(time.Second):
+			t.Fatal("timeout waiting for handshake to complete")
+		}
+		require.True(t, conn.ConnectionState().Used0RTT)
+
+		_, err = str.Write([]byte("foobar"))
+		require.NoError(t, err)
+		require.NoError(t, str.Close())
+
+		select {
+		case err := <-errChan:
+			require.NoError(t, err)
+		case <-time.After(time.Second):
+			t.Fatal("timeout waiting for the server to receive the data")
+		}
+		conn.CloseWithError(0, "")
+
+		serverQUICConn := <-serverConnChan
+		select {
+		case <-serverQUICConn.Context().Done():
+		case <-time.After(time.Second):
+			t.Fatal("timeout waiting for the connection to close")
+		}
+	})
+}
+
 func Test0RTTDisabledOnDial(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		const rtt = 25 * time.Millisecond
